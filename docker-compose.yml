@@ -1,0 +1,54 @@
+# 只常驻一个 web 服务；APP_PORT 可覆盖宿主端口映射，默认 4173。
+# verify 是一次性服务：跑完单测、生产构建探测与端到端验收后退出。
+#
+#   docker compose up web --build      # 常驻访问
+#   APP_PORT=8080 docker compose up web # 换宿主端口
+#   docker compose run --rm verify      # 一次性验收（测试 + 构建 + 首页探测）
+
+services:
+  web:
+    build:
+      context: .
+    image: ribbon-parity-lab:latest
+    ports:
+      - "${APP_PORT:-4173}:4173"
+    restart: unless-stopped
+    command: ["serve", "-s", "dist", "-l", "4173"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4173/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  verify:
+    image: ribbon-parity-lab:latest
+    build:
+      context: .
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: "no"
+    working_dir: /app
+    # 1) 单元测试  2) 生产构建（镜像内已构建一次，这里重新执行确认干净环境可重复）
+    # 3) 首页探测  4) Playwright 端到端验收（连 web 服务）
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        set -euo pipefail
+        echo "==> [1/4] Vitest 单元测试"
+        npm run test:run
+        echo "==> [2/4] 生产构建"
+        npm run build
+        echo "==> [3/4] 首页探测 (http://web:4173/)"
+        for i in $$(seq 1 30); do
+          if curl -fsS http://web:4173/ >/dev/null; then echo "首页可访问"; break; fi
+          sleep 2
+        done
+        curl -fsS http://web:4173/ | grep -q "友谊缎带"
+        echo "==> [4/4] Playwright 端到端验收"
+        npx playwright test
+        echo "全部验收通过。"
+    environment:
+      PLAYWRIGHT_BASE_URL: http://web:4173
+      PLAYWRIGHT_BROWSERS_PATH: /app/.pw-browsers
